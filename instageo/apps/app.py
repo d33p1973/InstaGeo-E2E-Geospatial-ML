@@ -116,11 +116,7 @@ def is_tile_in_viewport(tile_bounds: dict, viewport: dict) -> bool:
 
     tile_lat_min, tile_lat_max = tile_bounds['lat_min'], tile_bounds['lat_max']
     tile_lon_min, tile_lon_max = tile_bounds['lon_min'], tile_bounds['lon_max']
-
-    # Debug output
     print(f"Viewport: lat={lat_min},{lat_max}, lon={lon_min},{lon_max}")
-    print(f"Tile: lat={tile_lat_min},{tile_lat_max}, lon={tile_lon_min},{tile_lon_max}")
-
     # Check for intersection
     return not (tile_lat_max < lat_min or tile_lat_min > lat_max or
                 tile_lon_max < lon_min or tile_lon_min > lon_max)
@@ -148,7 +144,6 @@ def create_map_with_geotiff_tiles(tile_metadata: list, viewport: dict, zoom: flo
     for tile in tile_metadata:
         if is_tile_in_viewport(tile['bounds'], viewport):
             tile_path = os.path.join(base_dir, tile['name'])
-            print(f"Loading tile: {tile_path}")  # Debug output
             xarr_dataset, crs = read_geotiff_to_xarray_cached(tile_path)
             img, coordinates = add_raster_to_plotly_figure(
                 xarr_dataset, crs, "band_data", scale=1.0 if zoom > 8 else 0.5  # Downsample when zoomed out
@@ -229,6 +224,6 @@ def main() -> None:
         fig = create_map_with_geotiff_tiles(tile_metadata=[], viewport=st.session_state.viewport, zoom=st.session_state.zoom, base_dir="")
         st.session_state.map_fig = fig
         st.plotly_chart(fig, use_container_width=True)
-        
+
 if __name__ == "__main__":
     main()
