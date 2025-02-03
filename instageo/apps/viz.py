@@ -1,162 +1,103 @@
-# ------------------------------------------------------------------------------
-# This code is licensed under the Attribution-NonCommercial-ShareAlike 4.0
-# International (CC BY-NC-SA 4.0) License.
-#
-# You are free to:
-# - Share: Copy and redistribute the material in any medium or format
-# - Adapt: Remix, transform, and build upon the material
-#
-# Under the following terms:
-# - Attribution: You must give appropriate credit, provide a link to the license,
-#   and indicate if changes were made. You may do so in any reasonable manner,
-#   but not in any way that suggests the licensor endorses you or your use.
-# - NonCommercial: You may not use the material for commercial purposes.
-# - ShareAlike: If you remix, transform, or build upon the material, you must
-#   distribute your contributions under the same license as the original.
-#
-# For more details, see https://creativecommons.org/licenses/by-nc-sa/4.0/
-# ------------------------------------------------------------------------------
-
-"""Utils for Raster Visualisation."""
-
-import datashader as ds
-import datashader.transfer_functions as tf
-import matplotlib.cm
+import streamlit as st
+from streamlit_plotly_events import plotly_events
 import plotly.graph_objects as go
-import rasterio
 import xarray as xr
-from pyproj import CRS, Transformer
+from pyproj import CRS
+import numpy as np
+import datashader as ds
+import matplotlib.colormaps
+from shapely.geometry import box
+import rtree
 
-epsg3857_to_epsg4326 = Transformer.from_crs(3857, 4326, always_xy=True)
-
-
-def get_crs(filepath: str) -> CRS:
-    """Retrieves the CRS of a GeoTiff data.
-
-    Args:
-        filepath: Path to a GeoTiff file.
-
-    Returns:
-        CRS of data stored in `filepath`
-    """
-    src = rasterio.open(filepath)
-    return src.crs
-
-
-def add_raster_to_plotly_figure(
-    xarr_dataset: xr.Dataset,
-    from_crs: CRS,
-    column_name: str = "band_data",
-    scale: float = 1.0,
-) -> go.Figure:
-    """Add a raster plot on a Plotly graph object figure.
-
-    This function overlays raster data from an xarray dataset onto a Plotly map figure.
-    The data is reprojected to EPSG:3857 CRS for compatibility with Mapbox's projection
-    system.
-
-    Args:
-        xarr_dataset (xr.Dataset): xarray dataset containing the raster data.
-        from_crs (CRS): Coordinate Reference System of data stored in xarr_dataset.
-        column_name (str): Name of the column in `xarr_dataset` to be plotted. Defaults
-            to "band_data".
-        scale (float): Scale factor for adjusting the plot resolution. Defaults to 1.0.
-
-    Returns:
-        Figure: The modified Plotly figure with the raster data overlaid.
-    """
-    # Reproject to EPSG:3857 CRS
-    xarr_dataset = xarr_dataset.rio.write_crs(from_crs).rio.reproject("EPSG:3857")
-    xarr_dataset = xarr_dataset.where(xarr_dataset <= 1, 0)
-    # Get Raster dimension and range
-    numpy_data = xarr_dataset[column_name].squeeze().to_numpy()
-    plot_height, plot_width = numpy_data.shape
-
-    # Data aggregation
-    canvas = ds.Canvas(
-        plot_width=int(plot_width * scale), plot_height=int(plot_height * scale)
-    )
-    agg = canvas.raster(xarr_dataset[column_name].squeeze(), interpolate="linear")
-
-    coords_lat_min, coords_lat_max = (
-        agg.coords["y"].values.min(),
-        agg.coords["y"].values.max(),
-    )
-    coords_lon_min, coords_lon_max = (
-        agg.coords["x"].values.min(),
-        agg.coords["x"].values.max(),
-    )
-    # xarr_dataset CRS was converted to EPSG:3857 because when EPSG:4326 is used the
-    # overlaid image doesn't overlap properly resulting in misrepresentation. The actual
-    # cause of this behavior is that 'Mapbox supports the popular Web Mercator
-    # projection, and does not support any other projections.'
-    (
-        coords_lon_min,
-        coords_lon_max,
-    ), (
-        coords_lat_min,
-        coords_lat_max,
-    ) = epsg3857_to_epsg4326.transform(
-        [coords_lon_min, coords_lon_max], [coords_lat_min, coords_lat_max]
-    )
-    # Corners of the image, which need to be passed to mapbox
-    coordinates = [
-        [coords_lon_min, coords_lat_max],
-        [coords_lon_max, coords_lat_max],
-        [coords_lon_max, coords_lat_min],
-        [coords_lon_min, coords_lat_min],
-    ]
-
-    # Apply color map
-    img = tf.shade(
+# Function to apply color map
+def apply_color_map(agg):
+    """Apply a color map to the aggregated data."""
+    img = ds.tf.shade(
         agg,
         cmap=matplotlib.colormaps["Reds"],
         alpha=100,
         how="linear",
     )[::-1].to_pil()
-    return img, coordinates
+    return img
 
-
+# Function to read GeoTIFF to xarray
 def read_geotiff_to_xarray(filepath: str) -> tuple[xr.Dataset, CRS]:
-    """Read a GeoTIFF file into an xarray Dataset.
-
-    Args:
-        filepath (str): Path to the GeoTIFF file.
-
-    Returns:
-        xr.Dataset: The loaded xarray dataset.
-    """
+    """Read a GeoTIFF file into an xarray Dataset."""
     return xr.open_dataset(filepath).sel(band=1), get_crs(filepath)
 
+# Function to get bounding box of a GeoTIFF tile
+def get_tile_bounds(xarr_dataset: xr.Dataset) -> tuple[float, float, float, float]:
+    """Get the bounding box (min_lon, min_lat, max_lon, max_lat) of a GeoTIFF tile."""
+    lon = xarr_dataset['x'].values
+    lat = xarr_dataset['y'].values
+    return lon.min(), lat.min(), lon.max(), lat.max()
 
+# Function to create a map with dynamic tile loading
 def create_map_with_geotiff_tiles(tiles_to_overlay: list[str]) -> go.Figure:
-    """Create a map with multiple GeoTIFF tiles overlaid.
+    """Create a map with multiple GeoTIFF tiles overlaid dynamically."""
+    # Create an R-tree index for the tiles
+    index = rtree.index.Index()
+    tile_data = []
+    for idx, tile in enumerate(tiles_to_overlay):
+        if tile.endswith(".tif") or tile.endswith(".tiff"):
+            xarr_dataset, crs = read_geotiff_to_xarray(tile)
+            min_lon, min_lat, max_lon, max_lat = get_tile_bounds(xarr_dataset)
+            tile_bbox = box(min_lon, min_lat, max_lon, max_lat)
+            index.insert(idx, tile_bbox.bounds)
+            tile_data.append((xarr_dataset, crs))
 
-    This function reads GeoTIFF files from a specified directory and overlays them on a
-    Plotly map.
-
-    Args:
-        tiles_to_overlay (list[str]): Path to tiles to overlay on map.
-
-    Returns:
-        Figure: A Plotly figure with overlaid GeoTIFF tiles.
-    """
+    # Create the base map
     fig = go.Figure(go.Scattermapbox())
     fig.update_layout(
         mapbox_style="open-street-map",
-        mapbox=dict(center=go.layout.mapbox.Center(lat=0, lon=20), zoom=2.0),
+        mapbox=dict(center=go.layout.mapbox.Center(lat=0, lon=20), zoom=8.0),
+        margin={"r": 0, "t": 40, "l": 0, "b": 0},
     )
-    fig.update_layout(margin={"r": 0, "t": 40, "l": 0, "b": 0})
-    mapbox_layers = []
-    for tile in tiles_to_overlay:
-        if tile.endswith(".tif") or tile.endswith(".tiff"):
-            xarr_dataset, crs = read_geotiff_to_xarray(tile)
-            img, coordinates = add_raster_to_plotly_figure(
-                xarr_dataset, crs, "band_data", scale=1.0
-            )
+
+    # Capture map viewport changes
+    selected_points = plotly_events(fig, click_event=False, hover_event=False, relayout_event=True)
+
+    if selected_points:
+        viewport = selected_points[0].get("layout", {}).get("mapbox", {})
+        center_lon, center_lat = viewport['center']['lon'], viewport['center']['lat']
+        zoom = viewport['zoom']
+
+        # Calculate the visible bounds
+        delta = 180 / (2 ** zoom)
+        min_lon, max_lon = center_lon - delta, center_lon + delta
+        min_lat, max_lat = center_lat - delta, center_lat + delta
+
+        # Query intersecting tiles
+        viewport_bbox = box(min_lon, min_lat, max_lon, max_lat)
+        intersecting_tiles = list(index.intersection(viewport_bbox.bounds))
+
+        # Add only the visible tiles to the map
+        mapbox_layers = []
+        for tile_idx in intersecting_tiles:
+            xarr_dataset, crs = tile_data[tile_idx]
+            img = apply_color_map(xarr_dataset['band_data'])
+            min_lon, min_lat, max_lon, max_lat = get_tile_bounds(xarr_dataset)
+            coordinates = [
+                [min_lon, min_lat],
+                [min_lon, max_lat],
+                [max_lon, max_lat],
+                [max_lon, min_lat],
+            ]
             mapbox_layers.append(
                 {"sourcetype": "image", "source": img, "coordinates": coordinates}
             )
-    # Overlay the resulting image
-    fig.update_layout(mapbox_layers=mapbox_layers)
+
+        # Update the map with visible tiles
+        fig.update_layout(mapbox_layers=mapbox_layers)
+
     return fig
+
+# Example usage in Streamlit
+def main():
+    st.title("Dynamic GeoTIFF Tile Loading")
+    tiles_to_overlay = ["path/to/tile1.tif", "path/to/tile2.tif", ...]  # Add your tile paths here
+    fig = create_map_with_geotiff_tiles(tiles_to_overlay)
+    st.plotly_chart(fig)
+
+if __name__ == "main":
+    main()
