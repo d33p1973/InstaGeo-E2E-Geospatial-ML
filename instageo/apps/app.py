@@ -116,7 +116,7 @@ def is_tile_in_viewport(tile_bounds: dict, viewport: dict) -> bool:
 
     tile_lat_min, tile_lat_max = tile_bounds['lat_min'], tile_bounds['lat_max']
     tile_lon_min, tile_lon_max = tile_bounds['lon_min'], tile_bounds['lon_max']
-    print(f"Viewport: lat={lat_min},{lat_max}, lon={lon_min},{lon_max}")
+
     # Check for intersection
     return not (tile_lat_max < lat_min or tile_lat_min > lat_max or
                 tile_lon_max < lon_min or tile_lon_min > lon_max)
@@ -183,7 +183,7 @@ def main() -> None:
     st.title("InstaGeo Serve")
 
     st.sidebar.subheader(
-        "This application enables the visualisation of GeoTIFF files on an interactive map.",
+        "This application enables the visualization of GeoTIFF files on an interactive map.",
         divider="rainbow",
     )
     st.sidebar.header("Settings")
@@ -199,27 +199,54 @@ def main() -> None:
     # Load tile metadata from JSON file
     tile_metadata = load_tile_metadata("tile_metadata.json")
 
-    # Initialize viewport and zoom level in session state
-    if 'viewport' not in st.session_state:
+    # Ensure session state variables exist
+    if "viewport" not in st.session_state:
         st.session_state.viewport = {
-            'latitude': {'min': -2.91785776125, 'max': -1.13465911215},
-            'longitude': {'min': 29.0249263852, 'max': 30.8161348813}
+            "latitude": {"min": -2.91785776125, "max": -1.13465911215},
+            "longitude": {"min": 29.0249263852, "max": 30.8161348813},
         }
-    if 'zoom' not in st.session_state:
+    if "zoom" not in st.session_state:
         st.session_state.zoom = 10.0
+    if "map_initialized" not in st.session_state:
+        st.session_state.map_initialized = False  # Tracks if the map has been generated
 
-    # Capture the current viewport and zoom level from the map
-    if st.session_state.get('map_fig'):
-        relayout_data = st.session_state.map_fig.layout.mapbox
-        if relayout_data:
-            st.session_state.viewport = {
-                'latitude': {'min': relayout_data.center.lat - 0.1, 'max': relayout_data.center.lat + 0.1},
-                'longitude': {'min': relayout_data.center.lon - 0.1, 'max': relayout_data.center.lon + 0.1}
+    # Store relayoutData in session state
+    relayout_data = st.session_state.get("relayoutData", {})
+
+    # Button to start generating the map
+    if st.sidebar.button("Generate Map") or st.session_state.map_initialized:
+        st.session_state.map_initialized = True  # Ensure the map keeps updating
+
+        # Generate the map with the latest viewport
+        base_dir = os.path.join(directory, f"{year}/{month}")
+        fig = create_map_with_geotiff_tiles(tile_metadata, st.session_state.viewport, st.session_state.zoom, base_dir)
+
+        # Capture viewport changes
+        plotly_chart = st.plotly_chart(fig, use_container_width=True)
+
+        # Streamlit doesn't capture relayout events automatically; we must do it manually
+        with st.empty():
+            relayout_data = st.session_state.get("relayoutData", {})
+
+        if "mapbox.center" in relayout_data:
+            new_viewport = {
+                "latitude": {
+                    "min": relayout_data["mapbox.center"]["lat"] - 0.1,
+                    "max": relayout_data["mapbox.center"]["lat"] + 0.1,
+                },
+                "longitude": {
+                    "min": relayout_data["mapbox.center"]["lon"] - 0.1,
+                    "max": relayout_data["mapbox.center"]["lon"] + 0.1,
+                },
             }
-            st.session_state.zoom = relayout_data.zoom
+            new_zoom = relayout_data.get("mapbox.zoom", st.session_state.zoom)
 
-    if st.sidebar.button("Generate Map"):
-        generate_map(directory, year, month, st.session_state.viewport, st.session_state.zoom, tile_metadata)
+            #  Detect changes and trigger a rerun if needed
+            if new_viewport != st.session_state.viewport or new_zoom != st.session_state.zoom:
+                print("Viewport changed")  # Debugging print statement
+                st.session_state.viewport = new_viewport
+                st.session_state.zoom = new_zoom
+                st.experimental_rerun()  # Forces a rerun when viewport changes
     else:
         fig = create_map_with_geotiff_tiles(tile_metadata=[], viewport=st.session_state.viewport, zoom=st.session_state.zoom, base_dir="")
         st.session_state.map_fig = fig
